@@ -1,128 +1,76 @@
 import * as cheerio from "cheerio";
-import { fetchHtml } from "@/lib/fetchers/http";
-import { normalizeUrl } from "@/lib/utils";
+import type { CheerioAPI } from "cheerio";
+import type { Element } from "domhandler";
 
-export type Candidate = {
-  type: "TOOL" | "MODEL";
+export type ToolifyItem = {
   name: string;
   url: string;
-  rawText: string;
-  source: string;
-  sourceUrl: string;
+  description?: string;
+  logo?: string;
 };
 
-function absUrl(url: string) {
-  if (!url) return "";
-  if (url.startsWith("http")) return url;
-  if (url.startsWith("//")) return "https:" + url;
-  if (url.startsWith("/")) return "https://www.toolify.ai" + url;
-  return "https://www.toolify.ai/" + url.replace(/^\/+/, "");
-}
+const BASE_URL = "https://www.toolify.ai";
 
-function pickName($: cheerio.CheerioAPI, a: cheerio.Element) {
+/**
+ * anchor 태그에서 툴 이름 추출
+ */
+function pickName($: CheerioAPI, a: Element): string {
   const $a = $(a);
+
   const title = ($a.attr("title") ?? "").trim();
   if (title) return title.slice(0, 80);
 
-  // Often the anchor wraps a card; look for heading inside
-  const heading =
-    ($a.find("h1,h2,h3").first().text() ?? "").trim() ||
-    ($a.find("[data-testid='title']").first().text() ?? "").trim();
-
-  const text = (heading || $a.text() || "").trim().replace(/\s+/g, " ");
+  const text = $a.text().trim();
   return text.slice(0, 80);
 }
 
-function pickDesc($: cheerio.CheerioAPI, a: cheerio.Element) {
-  const $a = $(a);
-  // Try to grab a short description in the same card
-  const card = $a.closest("article, li, div");
-  const desc =
-    (card.find("p").first().text() ?? "").trim() ||
-    (card.find("[data-testid='desc']").first().text() ?? "").trim();
+/**
+ * Toolify 메인/카테고리 페이지 스캔
+ */
+export async function fetchToolify(): Promise<ToolifyItem[]> {
+  const res = await fetch(BASE_URL, {
+    headers: {
+      "user-agent":
+        "Mozilla/5.0 (compatible; AidicBot/1.0; +https://aidic2.vercel.app)"
+    },
+    cache: "no-store"
+  });
 
-  const clean = (desc || "").trim().replace(/\s+/g, " ");
-  return clean.slice(0, 400);
-}
+  if (!res.ok) {
+    throw new Error(`Toolify fetch failed: ${res.status}`);
+  }
 
-function uniqueByUrl(items: Candidate[]) {
+  const html = await res.text();
+  const $ = cheerio.load(html);
+
+  const items: ToolifyItem[] = [];
   const seen = new Set<string>();
-  const out: Candidate[] = [];
-  for (const it of items) {
-    const key = normalizeUrl(it.url);
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    out.push({ ...it, url: key });
-  }
-  return out;
-}
 
-export async function fetchToolifyNew(limit = 40): Promise<Candidate[]> {
-  const sourceUrl = "https://www.toolify.ai/new";
-  const html = await fetchHtml(sourceUrl);
-  if (!html) return [];
-  const $ = cheerio.load(html);
+  $("a[href^='/tool/']").each((_, el) => {
+    const a = el as Element;
+    const href = $(a).attr("href");
+    if (!href) return;
 
-  const items: Candidate[] = [];
+    const url = href.startsWith("http")
+      ? href
+      : `${BASE_URL}${href}`;
 
-  // Prefer explicit new-list selectors if present; fall back to broad selectors.
-  const anchors = $("a[href^='/ai-tool/'], a[href^='/tool/']").toArray();
-
-  for (const a of anchors) {
-    if (items.length >= limit * 3) break;
-    const href = $(a).attr("href") ?? "";
-    const url = normalizeUrl(absUrl(href));
-    if (!url) continue;
+    if (seen.has(url)) return;
+    seen.add(url);
 
     const name = pickName($, a);
-    if (!name) continue;
+    if (!name || name.length < 2) return;
 
-    const rawText =
-      pickDesc($, a) || "Toolify 신규 목록에서 수집된 항목입니다.";
-
-    items.push({
-      type: "TOOL",
-      name,
-      url,
-      rawText,
-      source: "toolify",
-      sourceUrl,
-    });
-  }
-
-  return uniqueByUrl(items).slice(0, limit);
-}
-
-export async function fetchToolifyModels(limit = 40): Promise<Candidate[]> {
-  const sourceUrl = "https://www.toolify.ai/ai-model";
-  const html = await fetchHtml(sourceUrl);
-  if (!html) return [];
-  const $ = cheerio.load(html);
-
-  const items: Candidate[] = [];
-  const anchors = $("a[href^='/ai-model/'], a[href^='/model/']").toArray();
-
-  for (const a of anchors) {
-    if (items.length >= limit * 3) break;
-    const href = $(a).attr("href") ?? "";
-    const url = normalizeUrl(absUrl(href));
-    if (!url) continue;
-
-    const name = pickName($, a);
-    if (!name) continue;
-
-    const rawText =
-      pickDesc($, a) || "Toolify 모델 목록에서 수집된 항목입니다.";
+    const logo =
+      $(a).find("img").attr("src") ??
+      $(a).find("img").attr("data-src");
 
     items.push({
-      type: "MODEL",
       name,
       url,
-      rawText,
-      source: "toolify",
-      sourceUrl,
+      logo
     });
-  }
+  });
 
-  return uniqueByUrl(items).slice(0, limit);
+  return items.slice(0, 100);
 }
